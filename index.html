@@ -1,0 +1,779 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NFSU Timetable Generator</title>
+
+<style>
+  /* ---------- Look and feel (colours live here) ---------- */
+  :root { --bg:#f6f7fb; --card:#ffffff; --text:#1c1e2b; --muted:#667085;
+          --line:#dde1ec; --main:#4f46e5; --good:#13804a; --bad:#c62828; }
+  body   { margin:0; padding:12px; background:var(--bg); color:var(--text);
+           font:14px system-ui, sans-serif; max-width:1150px; margin:auto; }
+  .hero  { background:linear-gradient(120deg,#4f46e5,#0ea5e9,#14b8a6); color:#fff;
+           border-radius:14px; padding:14px 18px; margin-bottom:10px; }
+  .hero h1 { margin:0; font-size:19px; }
+  .hero p  { margin:4px 0 0; font-size:12px; }
+  button, select { font:inherit; padding:6px 11px; border:1px solid var(--line);
+           background:var(--card); border-radius:8px; cursor:pointer; }
+  button.main { background:var(--main); color:#fff; border-color:var(--main); }
+  details { background:var(--card); border:1px solid var(--line); border-radius:10px;
+            padding:6px 10px; margin:8px 0; }
+  textarea { width:100%; height:140px; font:11px monospace; box-sizing:border-box;
+            border:1px solid var(--line); border-radius:8px; }
+  .boxes  { display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:8px; }
+  .row    { display:flex; gap:6px; flex-wrap:wrap; margin:8px 0; align-items:center; }
+  .status { padding:9px 12px; border-radius:10px; margin:8px 0; background:var(--card);
+            border:1px solid var(--line); }
+  .status.good { border-color:var(--good); color:var(--good); }
+  .status.bad  { border-color:var(--bad);  color:var(--bad);  }
+  .legend span { display:inline-block; margin:3px; padding:3px 8px; font-size:11px;
+            background:var(--card); border:1px solid var(--line); border-left:5px solid; border-radius:6px; }
+  .scroll { overflow-x:auto; }
+  table   { border-collapse:separate; border-spacing:3px; width:100%; min-width:620px; }
+  th, td  { padding:4px; vertical-align:top; font-size:12px; height:50px; border-radius:8px; }
+  th      { background:var(--card); border:1px solid var(--line); }
+  td      { background:var(--card); border:1px dashed var(--line); }
+  td.lunch{ background:#eceef5; color:var(--muted); text-align:center; vertical-align:middle; }
+  .chip   { border-left:5px solid; border-radius:6px; padding:3px 6px; margin:1px 0;
+            cursor:pointer; font-size:11px; line-height:1.3; }
+  .chip.selected { outline:2px solid #000; }
+  .small  { color:var(--muted); font-size:12px; }
+  @media print { .no-print { display:none !important; } }
+</style>
+</head>
+
+<body>
+
+<div class="hero">
+  <h1>🗓️ Automated Academic Timetable Generator</h1>
+  <p>School of Cyber Security and Digital Forensics, NFSU Gandhinagar ·
+     M.Sc. Digital Forensics and Information Security – I (2026-27) ·
+     Venue: Language Lab (LL) · Effective 12/10/2026</p>
+</div>
+
+<!-- STEP 1: the coordinator types the inputs here -->
+<details class="no-print">
+  <summary>1 · Coordinator inputs (click to open and edit)</summary>
+  <p class="small">
+    <b>Must never be broken:</b> working hours, breaks, teacher availability, clashes, room capacity,
+    lab type, consecutive periods, weekly counts, fixed sessions.<br>
+    <b>Nice to have (preferences):</b> a teacher's <code>preferred</code> slots.
+    A slot is written as <code>Day-PeriodNumber</code>, for example <code>"Tue-1"</code>
+    (period numbers start from 0).
+  </p>
+  <div class="boxes" id="inputBoxes"></div>
+</details>
+
+<!-- STEP 2: buttons -->
+<div class="row no-print">
+  <button class="main" onclick="generate(false)">⚙ Generate timetable</button>
+  <button onclick="generate(true)">↻ Regenerate (keep locked)</button>
+  <button onclick="saveDraft()">💾 Save draft</button>
+  <button onclick="loadDraft()">📂 Load draft</button>
+  <button class="main" onclick="publish()">✔ Validate &amp; publish</button>
+  <button onclick="window.print()">🖨 Print</button>
+  <button onclick="exportCsv()">⬇ Export CSV</button>
+  <button onclick="resetDemo()">Reset demo data</button>
+</div>
+
+<div id="status"></div>
+<div class="legend" id="legend"></div>
+
+<!-- STEP 3: choose how to look at the timetable -->
+<div class="row no-print">
+  <select id="viewType" onchange="fillFilterList(); refreshScreen()">
+    <option value="group">Programme / student-wise</option>
+    <option value="allTeachers">Faculty-wise (all faculty)</option>
+    <option value="teacher">One faculty member</option>
+    <option value="room">Classroom / Lab-wise</option>
+  </select>
+  <select id="viewFilter" onchange="refreshScreen()"></select>
+</div>
+
+<div class="scroll" id="tableArea"></div>
+<div id="editArea" class="no-print"></div>
+
+<details class="no-print">
+  <summary>Session IDs (needed only for "fixed" sessions)</summary>
+  <div class="small" id="sessionIds"></div>
+</details>
+<textarea id="csvBox" class="no-print" style="display:none;height:120px" readonly></textarea>
+
+
+<script>
+/* =====================================================================
+   PART 1 — THE DATA (what the coordinator would normally type in)
+   ===================================================================== */
+
+const INPUT_NAMES = ['settings', 'rooms', 'groups', 'teachers', 'subjects', 'fixed'];
+
+const DEFAULT_DATA = {
+
+  // Working days, periods and breaks (taken from the NFSU timetable PDF)
+  settings: {
+    days: ["Mon", "Tue", "Wed", "Thu", "Fri"],
+    periods: [
+      { label: "10:30-11:30" },
+      { label: "11:30-12:30" },
+      { label: "12:30-13:30" },
+      { label: "13:30-14:30 Lunch", isBreak: true },
+      { label: "14:30-15:30" },
+      { label: "15:30-16:30" },
+      { label: "16:30-17:30" }
+    ]
+  },
+
+  // Rooms and labs: type is "class", "lab" or "library"
+  // (capacities are assumed because the PDF does not list them)
+  rooms: [
+    { id: "LL",      type: "class",   capacity: 60 },
+    { id: "Library", type: "library", capacity: 60 },
+    { id: "IFS 302", type: "lab", labType: "pdf-lab", capacity: 45 },
+    { id: "IFS 002", type: "lab", labType: "ir-lab",  capacity: 45 },
+    { id: "BL 303",  type: "lab", labType: "df-lab",  capacity: 45 },
+    { id: "BL 209",  type: "lab", labType: "rm-room", capacity: 45 }
+  ],
+
+  // Student groups and their practical batches
+  groups: [
+    { id: "DFIS-I", strength: 40,
+      batches: [ { id: "DFIS-I-B1", strength: 20 }, { id: "DFIS-I-B2", strength: 20 } ] }
+  ],
+
+  // Faculty: unavailable = cannot teach, preferred = would like (soft)
+  teachers: [
+    { id: "PR",   name: "Prof. Dr. Parag Rughani",        unavailable: [], preferred: [],          maxPerDay: 5 },
+    { id: "SR",   name: "Mr. Sarang Rajvansh",            unavailable: [], preferred: [],          maxPerDay: 4 },
+    { id: "DD",   name: "Mr. Dharmesh Dave",              unavailable: [], preferred: ["Mon-0"],   maxPerDay: 4 },
+    { id: "RS",   name: "Dr. Ramya Shah",                 unavailable: [], preferred: [],          maxPerDay: 4 },
+    { id: "NP",   name: "Dr. Nilesh Panchal",             unavailable: [], preferred: ["Mon-5"],   maxPerDay: 4 },
+    { id: "HP",   name: "Dr. Himanshu Patel",             unavailable: [], preferred: ["Mon-4"],   maxPerDay: 4 },
+    { id: "KP",   name: "Ms. Krupali Panchal",            unavailable: [], preferred: ["Fri-6"],   maxPerDay: 4 },
+    { id: "SELF", name: "Library / Project (no faculty)", unavailable: [], preferred: [],          maxPerDay: 6 }
+  ],
+
+  // Subjects and how much teaching each needs every week
+  //   theoryPeriods     = number of one-period lectures
+  //   practicalSessions = number of lab sessions
+  //   practicalLength   = consecutive periods for each lab session
+  //   wholeClass        = true: the full class attends the lab together
+  //                       false: each batch gets its own lab session
+  subjects: [
+    { code: "MSDF26-PC-101", name: "Digital Forensics", short: "DF", color: "#e5484d",
+      group: "DFIS-I", teacher: "PR",
+      practicalSessions: 1, practicalLength: 1, wholeClass: true, labType: "df-lab" },
+    { code: "MSDF26-PC-101", name: "Digital Forensics", short: "DF", color: "#e5484d",
+      group: "DFIS-I", teacher: "SR", theoryPeriods: 2,
+      practicalSessions: 1, practicalLength: 1, wholeClass: true, labType: "df-lab" },
+    { code: "MSDF26-PC-104", name: "Theory Periods", short: "CSAC", color: "#3b82f6",
+      group: "DFIS-I", teacher: "DD", theoryPeriods: 5 },
+    { code: "MSDF26-PC-102", name: "Incident Response Management", short: "IRM", color: "#f59e0b",
+      group: "DFIS-I", teacher: "RS", theoryPeriods: 2,
+      practicalSessions: 1, practicalLength: 1, wholeClass: true, labType: "ir-lab" },
+    { code: "MSDF26-UC-101", name: "Introduction to Forensic Science and Law", short: "IFSL", color: "#8b5cf6",
+      group: "DFIS-I", teacher: "NP", theoryPeriods: 3 },
+    { code: "MSDF26-PC-103", name: "Programming for Digital Forensics", short: "PDF", color: "#10b981",
+      group: "DFIS-I", teacher: "HP", theoryPeriods: 2,
+      practicalSessions: 1, practicalLength: 1, wholeClass: true, labType: "pdf-lab" },
+    { code: "MSDF26-SE-101", name: "Research Methodology", short: "RM", color: "#ec4899",
+      group: "DFIS-I", teacher: "KP", theoryPeriods: 1,
+      practicalSessions: 1, practicalLength: 1, wholeClass: true, labType: "rm-room" },
+    { code: "LIB", name: "Library / Project", short: "Library/Project", color: "#64748b",
+      group: "DFIS-I", teacher: "SELF", theoryPeriods: 5, roomType: "library" }
+  ],
+
+  // Fixed sessions that must stay where they are, for example:
+  // { session: "MSDF26-PC-104-DD-T0", day: "Mon", period: 0, room: "LL" }
+  fixed: []
+};
+
+
+/* =====================================================================
+   PART 2 — THE PROGRAM'S MEMORY
+   ===================================================================== */
+
+let data = {};              // the inputs after reading the boxes
+let allSessions = [];       // every class that has to be placed
+let sessionById = {};       // find a session quickly by its id
+let placed = new Map();     // session id -> { day, period, room, locked }
+let busy = new Set();       // "who is busy when" notes, e.g. "teacher|PR|0|2"
+let selectedId = null;      // the session the coordinator clicked
+let isPublished = false;
+
+const el = id => document.getElementById(id);
+
+
+/* =====================================================================
+   PART 3 — TURN REQUIREMENTS INTO SESSIONS
+   A "session" is one class that must get a day, period and room.
+   "3 theory periods" becomes 3 sessions.
+   ===================================================================== */
+
+function buildSessions() {
+  const list = [];
+
+  for (const subject of data.subjects) {
+    const group = data.groups.find(g => g.id === subject.group);
+
+    // Whole-class sessions block the class AND all its batches.
+    // Batch sessions block only their own batch.
+    const everyoneInClass = [group.id, ...group.batches.map(b => b.id)];
+
+    const common = {
+      subjectCode: subject.code, short: subject.short || subject.code,
+      color: subject.color || "#888888",
+      teacher: subject.teacher, group: group.id
+    };
+
+    // Theory lectures (one period each)
+    for (let i = 0; i < (subject.theoryPeriods || 0); i++) {
+      list.push({ ...common,
+        id: `${subject.code}-${subject.teacher}-T${i}`,
+        length: 1,
+        roomType: subject.roomType || "class",
+        students: group.strength,
+        studentKeys: everyoneInClass });
+    }
+
+    // Practical sessions
+    for (let i = 0; i < (subject.practicalSessions || 0); i++) {
+      const length = subject.practicalLength || 1;
+
+      if (subject.wholeClass) {
+        list.push({ ...common,
+          id: `${subject.code}-${subject.teacher}-P${i}`,
+          length, roomType: "lab", labType: subject.labType, isLab: true,
+          students: group.strength, studentKeys: everyoneInClass });
+      } else {
+        for (const batch of group.batches) {
+          list.push({ ...common,
+            id: `${subject.code}-${subject.teacher}-${batch.id}-P${i}`,
+            length, roomType: "lab", labType: subject.labType, isLab: true,
+            batch: batch.id, students: batch.strength, studentKeys: [batch.id] });
+        }
+      }
+    }
+  }
+  return list;
+}
+
+
+/* =====================================================================
+   PART 4 — THE RULE CHECKER
+   One function answers: "Can this session go here?"
+   It returns the PROBLEM as text, or null if everything is fine.
+   The solver and manual edits both use it, so the rules live in one place.
+   ===================================================================== */
+
+// Everything that becomes "busy" when a session is placed.
+function busyNotesFor(session, day, firstPeriod, roomId) {
+  const notes = [];
+  for (let i = 0; i < session.length; i++) {
+    const p = firstPeriod + i;
+    notes.push(`teacher|${session.teacher}|${day}|${p}`);
+    notes.push(`room|${roomId}|${day}|${p}`);
+    for (const key of session.studentKeys) notes.push(`students|${key}|${day}|${p}`);
+  }
+  return notes;
+}
+
+function placeSession(session, day, period, roomId, locked = false) {
+  busyNotesFor(session, day, period, roomId).forEach(n => busy.add(n));
+  placed.set(session.id, { day, period, room: roomId, locked });
+}
+
+function removeSession(session) {
+  const spot = placed.get(session.id);
+  busyNotesFor(session, spot.day, spot.period, spot.room).forEach(n => busy.delete(n));
+  placed.delete(session.id);
+}
+
+function findProblem(session, day, firstPeriod, roomId) {
+  const room    = data.rooms.find(r => r.id === roomId);
+  const teacher = data.teachers.find(t => t.id === session.teacher);
+  const dayName = data.settings.days[day];
+
+  // --- room rules ---
+  if (room.type !== session.roomType)                    return "Wrong type of room";
+  if (session.labType && room.labType !== session.labType) return "Unsuitable laboratory";
+  if (room.capacity < session.students)
+    return `Room capacity too small (${room.capacity} seats for ${session.students} students)`;
+
+  // --- teacher's daily limit ---
+  let periodsToday = 0;
+  for (const [id, spot] of placed) {
+    if (id !== session.id && spot.day === day && sessionById[id].teacher === session.teacher)
+      periodsToday += sessionById[id].length;
+  }
+  if (teacher.maxPerDay && periodsToday + session.length > teacher.maxPerDay)
+    return "Faculty daily teaching limit exceeded";
+
+  // --- check every period the session needs ---
+  for (let i = 0; i < session.length; i++) {
+    const p = firstPeriod + i;
+    const period = data.settings.periods[p];
+
+    if (!period)         return "Outside university working hours";
+    if (period.isBreak)  return "Overlaps a scheduled break";
+    if ((teacher.unavailable || []).includes(`${dayName}-${p}`)) return "Faculty not available";
+    if (busy.has(`teacher|${session.teacher}|${day}|${p}`))      return "Faculty already teaching";
+    if (busy.has(`room|${roomId}|${day}|${p}`))                  return "Room already in use";
+    for (const key of session.studentKeys)
+      if (busy.has(`students|${key}|${day}|${p}`))               return "Student group already busy";
+  }
+  return null;  // no problem found
+}
+
+
+/* =====================================================================
+   PART 5 — SPOT IMPOSSIBLE INPUTS BEFORE SOLVING
+   ===================================================================== */
+
+// How many periods per week is this teacher really free?
+function teacherFreePeriods(teacher) {
+  let total = 0;
+  for (const dayName of data.settings.days) {
+    let freeToday = 0;
+    data.settings.periods.forEach((period, p) => {
+      const blocked = (teacher.unavailable || []).includes(`${dayName}-${p}`);
+      if (!period.isBreak && !blocked) freeToday++;
+    });
+    total += Math.min(freeToday, teacher.maxPerDay || 99);
+  }
+  return total;
+}
+
+// How many periods per week does this subject need?
+function periodsNeeded(subject) {
+  const group = data.groups.find(g => g.id === subject.group);
+  const labCopies = subject.wholeClass ? 1 : group.batches.length;
+  return (subject.theoryPeriods || 0) +
+         (subject.practicalSessions || 0) * (subject.practicalLength || 1) * labCopies;
+}
+
+function findImpossibleParts() {
+  const messages = [];
+
+  // 1. Subject needs more periods than its teacher has
+  for (const subject of data.subjects) {
+    const teacher = data.teachers.find(t => t.id === subject.teacher);
+    const need = periodsNeeded(subject), free = teacherFreePeriods(teacher);
+    if (need > free)
+      messages.push(`Subject ${subject.code} (${subject.short}) requires ${need} weekly periods, ` +
+                    `but its assigned faculty ${teacher.name} is available for only ${free} periods.`);
+  }
+
+  // 2. A teacher's total workload is more than their free time
+  for (const teacher of data.teachers) {
+    const need = data.subjects.filter(s => s.teacher === teacher.id)
+                              .reduce((sum, s) => sum + periodsNeeded(s), 0);
+    const free = teacherFreePeriods(teacher);
+    const alreadyReported = data.subjects.some(s => s.teacher === teacher.id && periodsNeeded(s) > free);
+    if (need > free && !alreadyReported)
+      messages.push(`${teacher.name} must teach ${need} periods per week but is available for only ${free}.`);
+  }
+
+  // 3. No room is big enough or of the right lab type
+  for (const s of allSessions) {
+    const roomExists = data.rooms.some(r => r.type === s.roomType && r.capacity >= s.students &&
+                                            (!s.labType || r.labType === s.labType));
+    if (!roomExists)
+      messages.push(`${s.id}: no suitable ${s.roomType}${s.labType ? " (" + s.labType + ")" : ""} ` +
+                    `with capacity for ${s.students} students.`);
+  }
+
+  // 4. A practical needs more consecutive periods than any break-free block
+  let run = 0, longestBlock = 0;
+  data.settings.periods.forEach(p => { run = p.isBreak ? 0 : run + 1; longestBlock = Math.max(longestBlock, run); });
+  allSessions.filter(s => s.length > longestBlock).forEach(s =>
+    messages.push(`${s.id} needs ${s.length} consecutive periods but the longest break-free block is ${longestBlock}.`));
+
+  // 5. The whole class has more lessons than the week has slots
+  const slotsPerWeek = data.settings.days.length * data.settings.periods.filter(p => !p.isBreak).length;
+  for (const group of data.groups) {
+    const lessons = allSessions.filter(s => s.group === group.id && s.studentKeys.length > 1)
+                               .reduce((sum, s) => sum + s.length, 0);
+    if (lessons > slotsPerWeek)
+      messages.push(`Group ${group.id} needs ${lessons} whole-class periods but only ${slotsPerWeek} slots exist per week.`);
+  }
+  return [...new Set(messages)];
+}
+
+// If a session still cannot be placed, say which rules block it most often.
+function explainWhyStuck(session) {
+  const counts = {};
+  data.settings.days.forEach((_, d) => data.settings.periods.forEach((_, p) => data.rooms.forEach(room => {
+    const problem = findProblem(session, d, p, room.id);
+    if (problem) counts[problem] = (counts[problem] || 0) + 1;
+  })));
+  return Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 3).map(x => x[0]).join("; ");
+}
+
+
+/* =====================================================================
+   PART 6 — THE SOLVER (tries a slot, moves on, and backs up if stuck)
+   ===================================================================== */
+
+function listGoodSlots(session) {
+  const teacher = data.teachers.find(t => t.id === session.teacher);
+  const options = [];
+
+  for (let d = 0; d < data.settings.days.length; d++)
+    for (let p = 0; p < data.settings.periods.length; p++)
+      for (const room of data.rooms) {
+        if (findProblem(session, d, p, room.id)) continue;   // mandatory rules: skip bad slots
+
+        // Lower score = tried first. Preferences only change the ORDER, never the rules.
+        let score = Math.random();                           // small randomness for variety
+        for (const [id, spot] of placed)                     // avoid same subject twice a day
+          if (spot.day === d && sessionById[id].subjectCode === session.subjectCode) score += 5;
+        if ((teacher.preferred || []).includes(`${data.settings.days[d]}-${p}`)) score -= 3;
+
+        options.push({ day: d, period: p, room: room.id, score });
+      }
+  return options.sort((a, b) => a.score - b.score);
+}
+
+function solveTimetable(timeLimitMs) {
+  // Hardest first: longer sessions, then labs
+  const toPlace = allSessions.filter(s => !placed.has(s.id))
+      .sort((a, b) => b.length - a.length || (b.isLab ? 1 : 0) - (a.isLab ? 1 : 0));
+
+  const startTime = Date.now();
+  let furthest = 0, ranOutOfTime = false;
+
+  function placeFrom(i) {
+    furthest = Math.max(furthest, i);
+    if (i === toPlace.length) return true;                   // everything placed
+    if (Date.now() - startTime > timeLimitMs) { ranOutOfTime = true; return false; }
+
+    const session = toPlace[i];
+    for (const option of listGoodSlots(session)) {
+      placeSession(session, option.day, option.period, option.room);
+      if (placeFrom(i + 1)) return true;                     // the rest worked out
+      removeSession(session);                                // dead end: undo and try next slot
+    }
+    return false;
+  }
+
+  const success = placeFrom(0);
+  return { success, ranOutOfTime, toPlace, stuckOn: toPlace[furthest] };
+}
+
+
+/* =====================================================================
+   PART 7 — BUTTONS
+   ===================================================================== */
+
+function clearTimetable() { busy = new Set(); placed = new Map(); }
+
+function showStatus(isGood, title, lines = []) {
+  isPublished = false;
+  const list = lines.length ? "<ul>" + lines.map(l => `<li>${l}</li>`).join("") + "</ul>" : "";
+  el("status").innerHTML = `<div class="status ${isGood ? "good" : "bad"}"><b>${title}</b>${list}</div>`;
+}
+
+function readInputs() {
+  for (const name of INPUT_NAMES) {
+    try { data[name] = JSON.parse(el(name).value); }
+    catch (e) { return `The "${name}" box has a typing mistake: ${e.message}`; }
+  }
+  return null;
+}
+
+function checkReferences() {
+  const errors = [];
+  for (const s of data.subjects) {
+    if (!data.groups.find(g => g.id === s.group))     errors.push(`Subject ${s.code}: unknown group "${s.group}"`);
+    if (!data.teachers.find(t => t.id === s.teacher)) errors.push(`Subject ${s.code}: unknown teacher "${s.teacher}"`);
+  }
+  return errors;
+}
+
+function placeFixedSessions() {
+  const problems = [];
+  for (const f of data.fixed) {
+    const session = sessionById[f.session];
+    const day = data.settings.days.indexOf(f.day);
+    if (!session) { problems.push(`Fixed session ${f.session} does not exist (see Session IDs).`); continue; }
+    if (placed.has(session.id)) continue;
+    const problem = findProblem(session, day, f.period, f.room);
+    if (problem) problems.push(`Fixed session ${f.session} at ${f.day} period ${f.period}: ${problem}`);
+    else placeSession(session, day, f.period, f.room, true);
+  }
+  return problems;
+}
+
+function countHonouredPreferences() {
+  let honoured = 0, total = 0;
+  for (const teacher of data.teachers) for (const slot of teacher.preferred || []) {
+    total++;
+    const [dayName, p] = slot.split("-");
+    for (const [id, spot] of placed) {
+      const s = sessionById[id];
+      if (s.teacher === teacher.id && data.settings.days[spot.day] === dayName &&
+          spot.period <= +p && +p < spot.period + s.length) { honoured++; break; }
+    }
+  }
+  return { honoured, total };
+}
+
+// The big button: read inputs -> build sessions -> check -> solve -> show
+function generate(keepLocked) {
+  const typingMistake = readInputs();
+  if (typingMistake) return showStatus(false, "Input error", [typingMistake]);
+  const badLinks = checkReferences();
+  if (badLinks.length) return showStatus(false, "Input error", badLinks);
+
+  const lockedBefore = keepLocked ? [...placed].filter(([id, spot]) => spot.locked) : [];
+
+  allSessions = buildSessions();
+  sessionById = Object.fromEntries(allSessions.map(s => [s.id, s]));
+  clearTimetable();
+  el("sessionIds").textContent = allSessions.map(s => s.id).join("  ·  ");
+  drawLegend();
+
+  const impossible = findImpossibleParts();
+  if (impossible.length) {
+    refreshScreen();
+    return showStatus(false, "This timetable is impossible with the current inputs", impossible);
+  }
+
+  for (const [id, spot] of lockedBefore)
+    if (sessionById[id]) placeSession(sessionById[id], spot.day, spot.period, spot.room, true);
+
+  const fixedProblems = placeFixedSessions();
+  if (fixedProblems.length) {
+    refreshScreen();
+    return showStatus(false, "Fixed sessions cannot be honoured", fixedProblems);
+  }
+
+  const result = solveTimetable(3000);
+  fillFilterList();
+  refreshScreen();
+
+  if (result.success) {
+    const pref = countHonouredPreferences();
+    showStatus(true, `Success: all ${allSessions.length} sessions scheduled with no conflicts` +
+      (pref.total ? ` · preferred slots honoured: ${pref.honoured}/${pref.total}` : ""));
+  } else {
+    showStatus(false,
+      `FAILED: no complete timetable found${result.ranOutOfTime ? " within the time limit" : ""}. Unassigned sessions:`,
+      [`Hardest to place: ${result.stuckOn ? result.stuckOn.id : "-"}`,
+       ...result.toPlace.map(s => `${s.id} (${s.short}, faculty ${s.teacher}): ${explainWhyStuck(s)}`)]);
+  }
+}
+
+// Manual edit: move the selected session and validate immediately
+function moveSelected() {
+  const session = sessionById[selectedId];
+  const old = { ...placed.get(selectedId) };
+  removeSession(session);
+
+  const day = +el("editDay").value, period = +el("editPeriod").value, room = el("editRoom").value;
+  const problem = findProblem(session, day, period, room);
+
+  if (problem) {                                  // rejected: put it back exactly where it was
+    placeSession(session, old.day, old.period, old.room, old.locked);
+    refreshScreen();
+    el("editMessage").innerHTML = `<span style="color:var(--bad)">Rejected: ${problem}</span>`;
+    return;
+  }
+  placeSession(session, day, period, room, old.locked);
+  isPublished = false;
+  refreshScreen();
+  el("editMessage").innerHTML = `<span style="color:var(--good)">Moved. No conflicts.</span>`;
+}
+
+function toggleLock() {
+  const spot = placed.get(selectedId);
+  spot.locked = !spot.locked;
+  refreshScreen();
+}
+
+function saveDraft() {
+  try {
+    const box = {}; INPUT_NAMES.forEach(n => box[n] = el(n).value);
+    box.placed = [...placed];
+    localStorage.setItem("timetable_draft", JSON.stringify(box));
+    showStatus(true, "Draft saved in this browser");
+  } catch (e) { showStatus(false, "Could not save the draft", [String(e)]); }
+}
+
+function loadDraft() {
+  try {
+    const box = JSON.parse(localStorage.getItem("timetable_draft") || "null");
+    if (!box) return showStatus(false, "No saved draft found");
+    INPUT_NAMES.forEach(n => el(n).value = box[n]);
+    readInputs();
+    allSessions = buildSessions();
+    sessionById = Object.fromEntries(allSessions.map(s => [s.id, s]));
+    clearTimetable();
+    for (const [id, spot] of box.placed)
+      if (sessionById[id]) placeSession(sessionById[id], spot.day, spot.period, spot.room, spot.locked);
+    drawLegend(); fillFilterList(); refreshScreen();
+    showStatus(true, "Draft loaded");
+  } catch (e) { showStatus(false, "Could not load the draft", [String(e)]); }
+}
+
+// Publish = re-check EVERYTHING from scratch; refuse if anything is wrong
+function publish() {
+  const typingMistake = readInputs();
+  if (typingMistake) return showStatus(false, "Input error", [typingMistake]);
+
+  const saved = [...placed], errors = [];
+  clearTimetable();
+  for (const [id, spot] of saved) {
+    const session = sessionById[id];
+    if (!session) continue;
+    const problem = findProblem(session, spot.day, spot.period, spot.room);
+    if (problem) errors.push(`${id}: ${problem}`);
+    else placeSession(session, spot.day, spot.period, spot.room, spot.locked);
+  }
+  allSessions.filter(s => !placed.has(s.id)).forEach(s => errors.push(`${s.id}: not scheduled`));
+
+  if (errors.length) {
+    clearTimetable();
+    saved.forEach(([id, spot]) => sessionById[id] && placeSession(sessionById[id], spot.day, spot.period, spot.room, spot.locked));
+    return showStatus(false, "Cannot publish: validation failed", errors);
+  }
+  try { localStorage.setItem("timetable_published", JSON.stringify([...placed])); } catch (e) {}
+  showStatus(true, "Published: the timetable passed full validation");
+  isPublished = true;
+  refreshScreen();
+}
+
+function exportCsv() {
+  const lines = ["session,subject,faculty,day,time,room"];
+  for (const [id, spot] of placed) {
+    const s = sessionById[id];
+    lines.push([id, s.short, s.teacher, data.settings.days[spot.day],
+                data.settings.periods[spot.period].label, spot.room].join(","));
+  }
+  el("csvBox").style.display = "block";
+  el("csvBox").value = lines.join("\n");
+  el("csvBox").select();
+}
+
+
+/* =====================================================================
+   PART 8 — DRAWING THE SCREEN
+   ===================================================================== */
+
+function drawLegend() {
+  const bySubject = {};
+  for (const s of data.subjects || []) {
+    const t = data.teachers.find(t => t.id === s.teacher);
+    (bySubject[s.code] = bySubject[s.code] || { s, names: [] }).names.push(`${t ? t.name : s.teacher} [${s.teacher}]`);
+  }
+  el("legend").innerHTML = Object.values(bySubject).map(x =>
+    `<span style="border-left-color:${x.s.color}"><b>${x.s.short}</b> ${x.s.code} · ${x.s.name} · ${x.names.join(", ")}</span>`).join("");
+}
+
+function fillFilterList() {
+  const view = el("viewType").value;
+  const items = view === "group"   ? (data.groups   || []).map(g => g.id)
+              : view === "teacher" ? (data.teachers || []).map(t => t.id)
+              :                      (data.rooms    || []).map(r => r.id);
+  const previous = el("viewFilter").value;
+  el("viewFilter").innerHTML = items.map(x => `<option>${x}</option>`).join("");
+  el("viewFilter").style.display = view === "allTeachers" ? "none" : "";
+  if (items.includes(previous)) el("viewFilter").value = previous;
+}
+
+// Which sessions belong in the current single-table view?
+function matchesCurrentView(sessionId, spot) {
+  const s = sessionById[sessionId], chosen = el("viewFilter").value, view = el("viewType").value;
+  if (view === "group")   return s.group === chosen;
+  if (view === "teacher") return s.teacher === chosen;
+  return spot.room === chosen;
+}
+
+// Draw one weekly table. "shouldShow" decides which sessions appear.
+function drawTable(shouldShow) {
+  const { days, periods } = data.settings;
+  let html = "<table><tr><th></th>" + days.map(d => `<th>${d}</th>`).join("") + "</tr>";
+
+  periods.forEach((period, p) => {
+    html += `<tr><th>${period.label}</th>`;
+    days.forEach((_, d) => {
+      if (period.isBreak) { html += `<td class="lunch">Lunch Break</td>`; return; }
+      html += "<td>";
+      for (const [id, spot] of placed) {
+        const covers = spot.day === d && p >= spot.period && p < spot.period + sessionById[id].length;
+        if (!covers || !shouldShow(id, spot)) continue;
+        const s = sessionById[id];
+        html += `<div class="chip ${selectedId === id ? "selected" : ""}"
+                      style="border-left-color:${s.color}; background:color-mix(in srgb, ${s.color} 20%, white)"
+                      onclick="selectSession('${id}')">
+                   ${spot.locked ? "🔒 " : ""}<b>${s.short}</b>${s.isLab ? " (Lab)" : ""}${s.batch ? " · " + s.batch : ""}
+                   <br>${spot.room}${s.teacher === "SELF" ? "" : " · " + s.teacher}
+                 </div>`;
+      }
+      html += "</td>";
+    });
+    html += "</tr>";
+  });
+  return html + "</table>";
+}
+
+function refreshScreen() {
+  if (!data.settings) { el("tableArea").innerHTML = ""; return; }
+  const view = el("viewType").value;
+
+  if (view === "allTeachers") {
+    // One table per teacher, stacked: this is the faculty-wise timetable
+    el("tableArea").innerHTML = data.teachers.filter(t => t.id !== "SELF")
+      .map(t => `<h3>${t.name} [${t.id}]</h3>` + drawTable((id, spot) => sessionById[id].teacher === t.id)).join("");
+  } else {
+    el("tableArea").innerHTML = drawTable(matchesCurrentView);
+  }
+  if (isPublished) el("tableArea").innerHTML += `<p class="small">✔ Published version (passed full validation)</p>`;
+  drawEditPanel();
+}
+
+function selectSession(id) { selectedId = id; refreshScreen(); }
+
+function drawEditPanel() {
+  if (!selectedId || !placed.has(selectedId)) {
+    el("editArea").innerHTML = `<p class="small">Click any session to move it (with instant conflict check) or lock it.</p>`;
+    return;
+  }
+  const spot = placed.get(selectedId);
+  const options = (items, chosen) => items.map((x, i) => `<option value="${i}" ${i === chosen ? "selected" : ""}>${x}</option>`).join("");
+  el("editArea").innerHTML = `
+    <div class="status"><b>${selectedId}</b> <span id="editMessage"></span>
+      <div class="row">
+        <select id="editDay">${options(data.settings.days, spot.day)}</select>
+        <select id="editPeriod">${options(data.settings.periods.map(p => p.label), spot.period)}</select>
+        <select id="editRoom">${data.rooms.map(r => `<option ${r.id === spot.room ? "selected" : ""}>${r.id}</option>`).join("")}</select>
+        <button class="main" onclick="moveSelected()">Move (validate)</button>
+        <button onclick="toggleLock()">${spot.locked ? "Unlock" : "Lock"}</button>
+      </div>
+    </div>`;
+}
+
+
+/* =====================================================================
+   PART 9 — START THE PROGRAM
+   ===================================================================== */
+
+el("inputBoxes").innerHTML = INPUT_NAMES.map(n =>
+  `<div><h4>${n}</h4><textarea id="${n}" spellcheck="false"></textarea></div>`).join("");
+
+function resetDemo() {
+  INPUT_NAMES.forEach(n => el(n).value = JSON.stringify(DEFAULT_DATA[n], null, 1));
+  readInputs();
+  clearTimetable();
+  allSessions = []; sessionById = {};
+  el("status").innerHTML = "";
+  drawLegend(); fillFilterList(); refreshScreen();
+  generate(false);
+}
+
+resetDemo();   // fill the boxes with the NFSU data and build a timetable straight away
+</script>
+</body>
+</html>
